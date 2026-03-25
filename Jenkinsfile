@@ -65,6 +65,9 @@ pipeline {
         stage('Build & Push Docker Image') {
             steps {
                 script {
+                                sh 'whoami'
+            sh 'docker version'
+            sh 'docker ps'
                     def imageTag = (env.BRANCH_NAME == 'main') ? sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() : "dev-${env.BUILD_NUMBER}"
                     env.IMAGE_TAG = imageTag
 
