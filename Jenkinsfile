@@ -2,7 +2,35 @@
 // HELPER FUNCTION: ส่ง Notification ไปยัง n8n (ตามแนวทางของ Express Pipeline)
 // =================================================================
 
-
+// def sendNotificationToN8n(String status, String stageName, String imageTag, String containerName, String hostPort) {
+//     // ต้องติดตั้ง HTTP Request Plugin และสร้าง Secret Text ชื่อ 'n8n-webhook'
+//     script {
+//         withCredentials([string(credentialsId: 'n8n-webhook', variable: 'N8N_WEBHOOK_URL')]) {
+//             def payload = [
+//                 project  : env.JOB_NAME,
+//                 stage    : stageName,
+//                 status   : status,
+//                 build    : env.BUILD_NUMBER,
+//                 image    : "${env.DOCKER_REPO}:${imageTag}",
+//                 container: containerName,
+//                 url      : "http://localhost:${hostPort}/",
+//                 timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX")
+//             ]
+//             def body = groovy.json.JsonOutput.toJson(payload)
+//             try {
+//                 httpRequest acceptType: 'APPLICATION_JSON',
+//                             contentType: 'APPLICATION_JSON',
+//                             httpMode: 'POST',
+//                             requestBody: body,
+//                             url: N8N_WEBHOOK_URL,
+//                             validResponseCodes: '200:299'
+//                 echo "n8n webhook (${status}) sent successfully."
+//             } catch (err) {
+//                 echo "Failed to send n8n webhook (${status}): ${err}"
+//             }
+//         }
+//     }
+// }
 
 pipeline {
     // ใช้ agent any เพราะ build จะทำงานบน Jenkins controller/agent (Linux)
@@ -56,11 +84,6 @@ pipeline {
                     }
                 }
             }
-            post {
-                always {
-                    junit 'test-results.xml'
-                }
-            }
         }
 
         // Stage 3: Build & Push Docker Image (Push latest เฉพาะ main)
@@ -81,32 +104,6 @@ pipeline {
                             customImage.push('latest')
                         }
                     }
-                }
-            }
-        }
-
-        // Deploy to DEV (Local Docker) — สำหรับ branch develop
-        stage('Deploy to DEV (Local Docker)') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
-            steps {
-                script {
-                    def deployCmd = """
-                            echo "Deploying container ${DEV_APP_NAME} from latest image..."
-                            docker pull ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker stop ${DEV_APP_NAME} || true
-                            docker rm ${DEV_APP_NAME} || true
-                            docker run -d --name ${DEV_APP_NAME} -p ${DEV_HOST_PORT}:5000 ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker ps --filter name=${DEV_APP_NAME} --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                        """
-                    sh deployCmd
-                }
-            }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to DEV (Local Docker)', env.IMAGE_TAG, env.DEV_APP_NAME, env.DEV_HOST_PORT)
                 }
             }
         }
@@ -143,11 +140,6 @@ pipeline {
                     sh deployCmd
                 }
             }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to PRODUCTION (Local Docker)', env.IMAGE_TAG, env.PROD_APP_NAME, env.PROD_HOST_PORT)
-                }
-            }
         }
 
         // Rollback เมื่อเลือก ACTION = Rollback
@@ -173,11 +165,6 @@ pipeline {
                     """
                 }
             }
-            post {
-                success {
-                    sendNotificationToN8n('success', "Rollback ${params.ROLLBACK_TARGET.toUpperCase()}", params.ROLLBACK_TAG, env.TARGET_APP_NAME, env.TARGET_HOST_PORT)
-                }
-            }
         }
     }
 
@@ -201,6 +188,8 @@ pipeline {
                 cleanWs()
             }
         }
-        
+        // failure {
+        //     // sendNotificationToN8n('failed', 'Pipeline Failed', 'N/A', 'N/A', 'N/A')
+        // }
     }
 }
