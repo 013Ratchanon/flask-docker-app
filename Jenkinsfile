@@ -68,24 +68,36 @@ pipeline {
         }
 
         stage('Build & Push Docker Image') {
-            when { expression { params.ACTION == 'Build & Deploy' } }
-            steps {
-                script {
-                    IMAGE_TAG = (env.BRANCH_NAME == 'main') ?
-                        sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                        : "dev-${env.BUILD_NUMBER}"
+    when { expression { params.ACTION == 'Build & Deploy' } }
+    steps {
+        script {
+            // ✅ กัน IMAGE_TAG ว่าง + debug ได้
+            def imageTag = (env.BRANCH_NAME == 'main') ?
+                sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                : "dev-${env.BUILD_NUMBER}"
 
-                    docker.withRegistry('https://index.docker.io/v1/', DOCKER_HUB_CREDENTIALS_ID) {
-                        def image = docker.build("${DOCKER_REPO}:${IMAGE_TAG}")
-                        image.push()
+            echo "Using IMAGE TAG: ${imageTag}"
 
-                        if (env.BRANCH_NAME == 'main') {
-                            image.push('latest')
-                        }
-                    }
+            // ✅ เช็ค Docker ใช้งานได้ไหม
+            sh "docker version"
+
+            // ✅ Build image
+            def image = docker.build("${DOCKER_REPO}:${imageTag}")
+
+            // ✅ Login + Push
+            docker.withRegistry('', DOCKER_HUB_CREDENTIALS_ID) {
+                image.push()
+
+                if (env.BRANCH_NAME == 'main') {
+                    image.push('latest')
                 }
             }
+
+            // ✅ เก็บค่าไว้ใช้ stage ถัดไป (แบบปลอดภัย)
+            IMAGE_TAG = imageTag
         }
+    }
+}
 
         // ✅ DEV ใช้ develop branch
         stage('Deploy to DEV') {
