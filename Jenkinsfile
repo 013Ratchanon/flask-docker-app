@@ -61,38 +61,26 @@ pipeline {
             }
         }
 
-      stage('Build & Push Docker Image') {
-    steps {
-        script {
-            // 🔍 debug
-            sh 'whoami'
-            sh 'docker version'
-            sh 'docker ps'
+        // Stage 3: Build & Push Docker Image (Push latest เฉพาะ main)
+        stage('Build & Push Docker Image') {
+            steps {
+                script {
+                    def imageTag = (env.BRANCH_NAME == 'main') ? sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() : "dev-${env.BUILD_NUMBER}"
+                    env.IMAGE_TAG = imageTag
 
-            // ✅ ไม่ใช้ env
-            def imageTag = (env.BRANCH_NAME == 'main') ?
-                sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-                : "dev-${env.BUILD_NUMBER}"
+                    docker.withRegistry('https://index.docker.io/v1/', DOCKER_HUB_CREDENTIALS_ID) {
+                        echo "Building image: ${DOCKER_REPO}:${env.IMAGE_TAG}"
+                        def customImage = docker.build("${DOCKER_REPO}:${env.IMAGE_TAG}")
 
-            echo "IMAGE TAG = ${imageTag}"
-
-            // ✅ build image
-            def image = docker.build("${DOCKER_REPO}:${imageTag}")
-
-            // ✅ login + push
-            docker.withRegistry('', DOCKER_HUB_CREDENTIALS_ID) {
-                image.push()
-
-                if (env.BRANCH_NAME == 'main') {
-                    image.push('latest')
+                        echo "Pushing images to Docker Hub..."
+                        customImage.push()
+                        if (env.BRANCH_NAME == 'main') {
+                            customImage.push('latest')
+                        }
+                    }
                 }
             }
-
-            // ✅ เก็บค่าไว้ใช้ต่อ (ไม่ใช้ env)
-            IMAGE_TAG = imageTag
         }
-    }
-}
 
         // Approval ก่อน Deploy ไป PROD
         stage('Approval for Production') {
