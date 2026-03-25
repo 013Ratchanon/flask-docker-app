@@ -1,52 +1,56 @@
 // =================================================================
-// HELPER FUNCTION: ส่ง Notification ไปยัง n8n (ตามแนวทางของ Express Pipeline)
+// HELPER FUNCTION: ส่ง Notification ไปยัง n8n
 // =================================================================
-
-
+def sendNotificationToN8n(status, stageName, tag, app, port) {
+    sh """
+        curl -X POST http://your-n8n-webhook-url \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "status": "${status}",
+            "stage": "${stageName}",
+            "tag": "${tag}",
+            "app": "${app}",
+            "port": "${port}"
+        }'
+    """
+}
 
 pipeline {
-    // ใช้ agent any เพราะ build จะทำงานบน Jenkins controller/agent (Linux)
     agent any
 
-    // กันเช็คเอาต์ซ้ำซ้อน (ตามแนวทาง Express)
     options {
         skipDefaultCheckout(true)
+        timeout(time: 30, unit: 'MINUTES')
     }
 
-    // Environment variables
     environment {
         DOCKER_HUB_CREDENTIALS_ID = 'docker-jenkins'
         DOCKER_REPO               = "013ratchanon/flask-docker-app"
 
-        // จำลอง DEV/PROD บน Local
         DEV_APP_NAME              = "flask-app-dev"
         DEV_HOST_PORT             = "5001"
         PROD_APP_NAME             = "flask-app-prod"
         PROD_HOST_PORT            = "3000"
     }
 
-    // Input parameters (Build & Deploy หรือ Rollback)
     parameters {
-        choice(name: 'ACTION', choices: ['Build & Deploy', 'Rollback'], description: 'เลือก Action ที่ต้องการ')
-        string(name: 'ROLLBACK_TAG', defaultValue: '', description: 'สำหรับ Rollback: ใส่ Image Tag (เช่น Git Hash หรือ dev-123)')
-        choice(name: 'ROLLBACK_TARGET', choices: ['dev', 'prod'], description: 'สำหรับ Rollback: เลือก Environment')
+        choice(name: 'ACTION', choices: ['Build & Deploy', 'Rollback'], description: 'เลือก Action')
+        string(name: 'ROLLBACK_TAG', defaultValue: '', description: 'Image Tag สำหรับ Rollback')
+        choice(name: 'ROLLBACK_TARGET', choices: ['dev', 'prod'], description: 'เลือก Environment')
     }
 
     stages {
-        // Stage 1: Checkout
+
         stage('Checkout') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
-                echo "Checking out code..."
                 checkout scm
             }
         }
 
-        // Stage 2: Install & Test (ใช้ Python container เหมือนแนวคิด Express/Node test)
         stage('Install & Test') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
-                echo "Running tests inside a consistent Docker environment..."
                 script {
                     docker.image('python:3.13-slim').inside {
                         sh '''
@@ -63,144 +67,128 @@ pipeline {
             }
         }
 
-        // Stage 3: Build & Push Docker Image (Push latest เฉพาะ main)
         stage('Build & Push Docker Image') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
                 script {
-                    def imageTag = (env.BRANCH_NAME == 'main') ? sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() : "dev-${env.BUILD_NUMBER}"
-                    env.IMAGE_TAG = imageTag
+                    IMAGE_TAG = (env.BRANCH_NAME == 'main') ?
+                        sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                        : "dev-${env.BUILD_NUMBER}"
 
                     docker.withRegistry('https://index.docker.io/v1/', DOCKER_HUB_CREDENTIALS_ID) {
-                        echo "Building image: ${DOCKER_REPO}:${env.IMAGE_TAG}"
-                        def customImage = docker.build("${DOCKER_REPO}:${env.IMAGE_TAG}")
+                        def image = docker.build("${DOCKER_REPO}:${IMAGE_TAG}")
+                        image.push()
 
-                        echo "Pushing images to Docker Hub..."
-                        customImage.push()
                         if (env.BRANCH_NAME == 'main') {
-                            customImage.push('latest')
+                            image.push('latest')
                         }
                     }
                 }
             }
         }
 
-        // Deploy to DEV (Local Docker) — สำหรับ branch develop
-        stage('Deploy to DEV (Local Docker)') {
+        // ✅ DEV ใช้ develop branch
+        stage('Deploy to DEV') {
             when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
+                allOf {
+                    expression { params.ACTION == 'Build & Deploy' }
+                    branch 'develop'
+                }
             }
             steps {
                 script {
-                    def deployCmd = """
-                            echo "Deploying container ${DEV_APP_NAME} from latest image..."
-                            docker pull ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker stop ${DEV_APP_NAME} || true
-                            docker rm ${DEV_APP_NAME} || true
-                            docker run -d --name ${DEV_APP_NAME} -p ${DEV_HOST_PORT}:5000 ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker ps --filter name=${DEV_APP_NAME} --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                        """
-                    sh deployCmd
-                }
-            }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to DEV (Local Docker)', env.IMAGE_TAG, env.DEV_APP_NAME, env.DEV_HOST_PORT)
-                }
-            }
-        }
-
-        // Approval ก่อน Deploy ไป PROD
-        stage('Approval for Production') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
-            steps {
-                timeout(time: 1, unit: 'HOURS') {
-                    input message: "Deploy image tag '${env.IMAGE_TAG}' to PRODUCTION (Local Docker on port ${PROD_HOST_PORT})?"
-                }
-            }
-        }
-
-        // Deploy to PROD (Local Docker) — สำหรับ branch main
-        stage('Deploy to PRODUCTION (Local Docker)') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
-            steps {
-                script {
-                    def deployCmd = """
-                            echo "Deploying container ${PROD_APP_NAME} from latest image..."
-                            docker pull ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker stop ${PROD_APP_NAME} || true
-                            docker rm ${PROD_APP_NAME} || true
-                            docker run -d --name ${PROD_APP_NAME} -p ${PROD_HOST_PORT}:5000 ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker ps --filter name=${PROD_APP_NAME} --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                        """
-                    sh deployCmd
-                }
-            }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to PRODUCTION (Local Docker)', env.IMAGE_TAG, env.PROD_APP_NAME, env.PROD_HOST_PORT)
-                }
-            }
-        }
-
-        // Rollback เมื่อเลือก ACTION = Rollback
-        stage('Execute Rollback') {
-            when { expression { params.ACTION == 'Rollback' } }
-            steps {
-                script {
-                    if (params.ROLLBACK_TAG.trim().isEmpty()) {
-                        error "เมื่อเลือก Rollback กรุณาระบุ 'ROLLBACK_TAG'"
-                    }
-
-                    env.TARGET_APP_NAME  = (params.ROLLBACK_TARGET == 'dev') ? env.DEV_APP_NAME  : env.PROD_APP_NAME
-                    env.TARGET_HOST_PORT = (params.ROLLBACK_TARGET == 'dev') ? env.DEV_HOST_PORT : env.PROD_HOST_PORT
-                    def imageToDeploy = "${DOCKER_REPO}:${params.ROLLBACK_TAG.trim()}"
-
-                    echo "ROLLING BACK ${params.ROLLBACK_TARGET.toUpperCase()} to image: ${imageToDeploy}"
-
                     sh """
-                        docker pull ${imageToDeploy}
-                        docker stop ${env.TARGET_APP_NAME} || true
-                        docker rm ${env.TARGET_APP_NAME} || true
-                        docker run -d --name ${env.TARGET_APP_NAME} -p ${env.TARGET_HOST_PORT}:5000 ${imageToDeploy}
+                        set -e
+                        docker pull ${DOCKER_REPO}:${IMAGE_TAG}
+                        docker stop ${DEV_APP_NAME} || true
+                        docker rm ${DEV_APP_NAME} || true
+                        docker run -d --name ${DEV_APP_NAME} -p ${DEV_HOST_PORT}:5000 ${DOCKER_REPO}:${IMAGE_TAG}
                     """
                 }
             }
             post {
                 success {
-                    sendNotificationToN8n('success', "Rollback ${params.ROLLBACK_TARGET.toUpperCase()}", params.ROLLBACK_TAG, env.TARGET_APP_NAME, env.TARGET_HOST_PORT)
+                    sendNotificationToN8n('success', 'DEV Deploy', IMAGE_TAG, DEV_APP_NAME, DEV_HOST_PORT)
+                }
+            }
+        }
+
+        stage('Approval for Production') {
+            when {
+                allOf {
+                    expression { params.ACTION == 'Build & Deploy' }
+                    branch 'main'
+                }
+            }
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    input message: "Deploy ${IMAGE_TAG} to PRODUCTION?"
+                }
+            }
+        }
+
+        stage('Deploy to PROD') {
+            when {
+                allOf {
+                    expression { params.ACTION == 'Build & Deploy' }
+                    branch 'main'
+                }
+            }
+            steps {
+                script {
+                    sh """
+                        set -e
+                        docker pull ${DOCKER_REPO}:${IMAGE_TAG}
+                        docker stop ${PROD_APP_NAME} || true
+                        docker rm ${PROD_APP_NAME} || true
+                        docker run -d --name ${PROD_APP_NAME} -p ${PROD_HOST_PORT}:5000 ${DOCKER_REPO}:${IMAGE_TAG}
+                    """
+                }
+            }
+            post {
+                success {
+                    sendNotificationToN8n('success', 'PROD Deploy', IMAGE_TAG, PROD_APP_NAME, PROD_HOST_PORT)
+                }
+            }
+        }
+
+        stage('Rollback') {
+            when { expression { params.ACTION == 'Rollback' } }
+            steps {
+                script {
+                    if (!params.ROLLBACK_TAG?.trim()) {
+                        error "กรุณาระบุ ROLLBACK_TAG"
+                    }
+
+                    def targetApp  = (params.ROLLBACK_TARGET == 'dev') ? DEV_APP_NAME  : PROD_APP_NAME
+                    def targetPort = (params.ROLLBACK_TARGET == 'dev') ? DEV_HOST_PORT : PROD_HOST_PORT
+                    def image      = "${DOCKER_REPO}:${params.ROLLBACK_TAG}"
+
+                    sh """
+                        set -e
+                        docker pull ${image}
+                        docker stop ${targetApp} || true
+                        docker rm ${targetApp} || true
+                        docker run -d --name ${targetApp} -p ${targetPort}:5000 ${image}
+                    """
+
+                    sendNotificationToN8n('success', 'Rollback', params.ROLLBACK_TAG, targetApp, targetPort)
                 }
             }
         }
     }
 
-    // Post actions
     post {
         always {
             script {
-                if (params.ACTION == 'Build & Deploy') {
-                    echo "Cleaning up Docker images on agent..."
-                    try {
-                        sh """
-                            docker image rm -f ${DOCKER_REPO}:${env.IMAGE_TAG} || true
-                            docker image rm -f ${DOCKER_REPO}:latest || true
-                        """
-                    } catch (err) {
-                        echo "Could not clean up images, but continuing..."
-                    }
+                if (params.ACTION == 'Build & Deploy' && IMAGE_TAG) {
+                    sh """
+                        docker image rm -f ${DOCKER_REPO}:${IMAGE_TAG} || true
+                        docker image rm -f ${DOCKER_REPO}:latest || true
+                    """
                 }
-                // ส่วนของการลบ Workspace
-                echo "Cleaning up workspace..."
                 cleanWs()
             }
         }
-        
     }
 }
