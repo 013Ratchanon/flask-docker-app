@@ -2,36 +2,6 @@
 // HELPER FUNCTION: ส่ง Notification ไปยัง n8n (ตามแนวทางของ Express Pipeline)
 // =================================================================
 
-// def sendNotificationToN8n(String status, String stageName, String imageTag, String containerName, String hostPort) {
-//     // ต้องติดตั้ง HTTP Request Plugin และสร้าง Secret Text ชื่อ 'n8n-webhook'
-//     script {
-//         withCredentials([string(credentialsId: 'n8n-webhook', variable: 'N8N_WEBHOOK_URL')]) {
-//             def payload = [
-//                 project  : env.JOB_NAME,
-//                 stage    : stageName,
-//                 status   : status,
-//                 build    : env.BUILD_NUMBER,
-//                 image    : "${env.DOCKER_REPO}:${imageTag}",
-//                 container: containerName,
-//                 url      : "http://localhost:${hostPort}/",
-//                 timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX")
-//             ]
-//             def body = groovy.json.JsonOutput.toJson(payload)
-//             try {
-//                 httpRequest acceptType: 'APPLICATION_JSON',
-//                             contentType: 'APPLICATION_JSON',
-//                             httpMode: 'POST',
-//                             requestBody: body,
-//                             url: N8N_WEBHOOK_URL,
-//                             validResponseCodes: '200:299'
-//                 echo "n8n webhook (${status}) sent successfully."
-//             } catch (err) {
-//                 echo "Failed to send n8n webhook (${status}): ${err}"
-//             }
-//         }
-//     }
-// }
-
 pipeline {
     // ใช้ agent any เพราะ build จะทำงานบน Jenkins controller/agent (Linux)
     agent any
@@ -84,11 +54,15 @@ pipeline {
                     }
                 }
             }
+            post {
+                always {
+                    junit 'test-results.xml'
+                }
+            }
         }
 
         // Stage 3: Build & Push Docker Image (Push latest เฉพาะ main)
         stage('Build & Push Docker Image') {
-            when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
                 script {
                     def imageTag = (env.BRANCH_NAME == 'main') ? sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() : "dev-${env.BUILD_NUMBER}"
@@ -110,10 +84,6 @@ pipeline {
 
         // Approval ก่อน Deploy ไป PROD
         stage('Approval for Production') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
             steps {
                 timeout(time: 1, unit: 'HOURS') {
                     input message: "Deploy image tag '${env.IMAGE_TAG}' to PRODUCTION (Local Docker on port ${PROD_HOST_PORT})?"
@@ -123,10 +93,6 @@ pipeline {
 
         // Deploy to PROD (Local Docker) — สำหรับ branch main
         stage('Deploy to PRODUCTION (Local Docker)') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
             steps {
                 script {
                     def deployCmd = """
@@ -144,25 +110,27 @@ pipeline {
 
         // Rollback เมื่อเลือก ACTION = Rollback
         stage('Execute Rollback') {
-            when { expression { params.ACTION == 'Rollback' } }
+            when { expression { params.ACTION == 'Rollback' } } 
             steps {
                 script {
                     if (params.ROLLBACK_TAG.trim().isEmpty()) {
                         error "เมื่อเลือก Rollback กรุณาระบุ 'ROLLBACK_TAG'"
                     }
 
-                    env.TARGET_APP_NAME  = (params.ROLLBACK_TARGET == 'dev') ? env.DEV_APP_NAME  : env.PROD_APP_NAME
-                    env.TARGET_HOST_PORT = (params.ROLLBACK_TARGET == 'dev') ? env.DEV_HOST_PORT : env.PROD_HOST_PORT
+                    // ใช้ PROD_APP_NAME และ PROD_HOST_PORT ตามที่คุณตั้งใน env
+                    def targetApp = env.PROD_APP_NAME
+                    def targetPort = env.PROD_HOST_PORT
                     def imageToDeploy = "${DOCKER_REPO}:${params.ROLLBACK_TAG.trim()}"
 
-                    echo "ROLLING BACK ${params.ROLLBACK_TARGET.toUpperCase()} to image: ${imageToDeploy}"
+                    echo "ROLLING BACK to image: ${imageToDeploy}"
 
                     sh """
                         docker pull ${imageToDeploy}
-                        docker stop ${env.TARGET_APP_NAME} || true
-                        docker rm ${env.TARGET_APP_NAME} || true
-                        docker run -d --name ${env.TARGET_APP_NAME} -p ${env.TARGET_HOST_PORT}:5000 ${imageToDeploy}
+                        docker stop ${targetApp} || true
+                        docker rm ${targetApp} || true
+                        docker run -d --name ${targetApp} -p ${targetPort}:5000 ${imageToDeploy}
                     """
+                    sendNotificationToN8n('success', "Rollback Executed", params.ROLLBACK_TAG, targetApp, targetPort)
                 }
             }
         }
@@ -188,8 +156,5 @@ pipeline {
                 cleanWs()
             }
         }
-        // failure {
-        //     // sendNotificationToN8n('failed', 'Pipeline Failed', 'N/A', 'N/A', 'N/A')
-        // }
     }
 }
